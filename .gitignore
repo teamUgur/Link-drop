@@ -25,3 +25,10 @@ dist-ssr
 
 # Local Codex project memory
 .claude/
+
+# Секреты окружения (токен бота, секрет webhook)
+.env
+
+# Локальные заметки по проекту, в репозиторий не идут
+/plan.md
+/memory.md
