@@ -1,3 +1,4 @@
+import cookie from "@fastify/cookie";
 import rateLimit from "@fastify/rate-limit";
 import Fastify, {type FastifyError, type FastifyInstance} from "fastify";
 import {MaxClient, type FetchFn} from "./bots/max/client.ts";
@@ -83,7 +84,9 @@ export async function buildApp({env, runner, maxFetch, maxSleep}: AppDeps): Prom
         maxDurationSec: env.MAX_DURATION_SEC,
     });
 
-    const prepared = new PreparedFiles(env.PREPARED_FILE_TTL_SEC * 1000, env.PREPARED_FILES_LIMIT, app.log.child({module: "prepared-files"}));
+    await app.register(cookie);
+
+    const prepared = new PreparedFiles(env.PREPARED_FILE_TTL_SEC * 1000, env.PREPARED_FILES_LIMIT, env.DOWNLOADS_PER_IP, app.log.child({module: "prepared-files"}));
     // onClose срабатывает после того, как Fastify дождался текущих запросов — идущие отдачи не рвём.
     app.addHook("onClose", () => prepared.clear());
 
@@ -93,11 +96,14 @@ export async function buildApp({env, runner, maxFetch, maxSleep}: AppDeps): Prom
         prepared,
         resolvePerMinute: env.RATE_LIMIT_RESOLVE_PER_MIN,
         downloadPerMinute: env.RATE_LIMIT_DOWNLOAD_PER_MIN,
+        downloadsPerIp: env.DOWNLOADS_PER_IP,
     });
 
     if (env.MAX_BOT_TOKEN && env.MAX_WEBHOOK_SECRET) {
         const client = new MaxClient(env.MAX_API_URL, env.MAX_BOT_TOKEN, maxFetch, maxSleep);
-        const bot = new MaxBotService(client, media, app.log.child({module: "max-bot"}));
+        // Отдельный семафор перед общим: бот берёт не больше своих слотов, остальное остаётся сайту.
+        const botLimiter = new Semaphore(env.BOT_DOWNLOAD_CONCURRENCY, env.QUEUE_LIMIT, limiterRetryAfter);
+        const bot = new MaxBotService(client, media, botLimiter, app.log.child({module: "max-bot"}));
         await app.register(maxBotRoutes, {service: bot, secret: env.MAX_WEBHOOK_SECRET});
         return {app, maxBot: bot};
     }

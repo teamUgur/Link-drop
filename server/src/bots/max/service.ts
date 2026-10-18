@@ -1,6 +1,7 @@
 import type {FastifyBaseLogger} from "fastify";
 import {AppError, BusyError} from "../../errors.ts";
 import type {MediaService} from "../../media/service.ts";
+import type {Semaphore} from "../../shared/semaphore.ts";
 import {detectSource, findUrl} from "../../media/sources.ts";
 import type {MaxClient, Recipient, UploadType} from "./client.ts";
 import type {MaxUpdate} from "./schemas.ts";
@@ -20,6 +21,7 @@ const TEXT = {
 export class MaxBotService {
     private readonly client: MaxClient;
     private readonly media: MediaService;
+    private readonly limiter: Semaphore;
     private readonly log: FastifyBaseLogger;
     private readonly tasks = new Set<Promise<void>>();
     // In-memory, потому что инстанс один. MAX повторяет доставку, если не получил 200 за 30 с;
@@ -28,9 +30,10 @@ export class MaxBotService {
     private readonly seen = new Map<string, true>();
     private readonly activeUsers = new Set<number>();
 
-    constructor(client: MaxClient, media: MediaService, log: FastifyBaseLogger) {
+    constructor(client: MaxClient, media: MediaService, limiter: Semaphore, log: FastifyBaseLogger) {
         this.client = client;
         this.media = media;
+        this.limiter = limiter;
         this.log = log;
     }
 
@@ -99,7 +102,8 @@ export class MaxBotService {
         try {
             detectSource(url);
             await this.client.sendMessage(to, {text: TEXT.working});
-            const file = await this.media.download(url, "mp4-720");
+            // Слот бота держим только на время yt-dlp: отправка в MAX не занимает загрузчик.
+            const file = await this.limiter.run(() => this.media.download(url, "mp4-720"));
             try {
                 const type: UploadType = file.sizeBytes <= VIDEO_ATTACHMENT_MAX_BYTES ? "video" : "file";
                 const token = await this.client.upload(type, file.filePath, file.fileName, file.contentType);
@@ -109,11 +113,12 @@ export class MaxBotService {
             }
         } catch (e) {
             if (e instanceof AppError) {
-                if (!(e instanceof BusyError) && e.statusCode >= 500) this.log.warn({err: e, url}, "max bot download failed");
+                // Без ссылки в логе: что человек качает — его данные; сайт их тоже не пишет (app.ts).
+                if (!(e instanceof BusyError) && e.statusCode >= 500) this.log.warn({err: e}, "max bot download failed");
                 await this.client.sendMessage(to, {text: e.message});
                 return;
             }
-            this.log.error({err: e, url}, "max bot delivery failed");
+            this.log.error({err: e}, "max bot delivery failed");
             await this.client.sendMessage(to, {text: TEXT.failed});
         }
     }

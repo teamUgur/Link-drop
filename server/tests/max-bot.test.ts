@@ -146,6 +146,25 @@ describe("MAX webhook", () => {
         await bot.drain();
     });
 
+    it("bot takes at most BOT_DOWNLOAD_CONCURRENCY slots, the site keeps the rest", async () => {
+        let open!: () => void;
+        runner.gate = new Promise((r) => (open = r));
+        // Три разных пользователя: при BOT_DOWNLOAD_CONCURRENCY=2 третий ждёт слота бота.
+        for (const userId of [1, 2, 3]) await post(update(`https://youtu.be/v${userId}`, `m${userId}`, userId));
+        await expect.poll(() => runner.calls.length).toBe(2);
+        await new Promise((r) => setTimeout(r, 50));
+        expect(runner.calls).toHaveLength(2);
+
+        // Третий слот общего загрузчика свободен для сайта.
+        const site = app.inject({method: "POST", url: "/api/media/prepare", payload: {url: "https://youtu.be/site", format: "mp4-720"}});
+        await expect.poll(() => runner.calls.length).toBe(3);
+
+        open();
+        expect((await site).statusCode).toBe(200);
+        await bot.drain();
+        expect(runner.calls).toHaveLength(4);
+    });
+
     it("acks malformed update with 200", async () => {
         const res = await post({update_type: "message_created", message: {nope: true}});
         expect(res.statusCode).toBe(200);

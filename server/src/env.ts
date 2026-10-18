@@ -41,6 +41,15 @@ const envSchema = z.object({
     RATE_LIMIT_RESOLVE_PER_MIN: z.coerce.number().int().min(1).default(20),
     RATE_LIMIT_DOWNLOAD_PER_MIN: z.coerce.number().int().min(1).default(6),
 
+    // Одновременных подготовок с одного IP. Браузеру — всегда одна (cookie сессии), но cookie
+    // атакующий просто не пошлёт, поэтому настоящая граница — этот потолок. 2, а не 1: люди
+    // за одним NAT (офис, кафе) не ждут друг друга, а один адрес занимает не больше 2 из 3 слотов.
+    DOWNLOADS_PER_IP: z.coerce.number().int().min(1).default(2),
+
+    // Сколько слотов загрузки из DOWNLOAD_CONCURRENCY может занять бот. Должно быть меньше:
+    // аккаунт в MAX бесплатный, и пачка аккаунтов иначе заняла бы все слоты сайта.
+    BOT_DOWNLOAD_CONCURRENCY: z.coerce.number().int().min(1).default(2),
+
     MAX_BOT_TOKEN: optionalString,
     MAX_WEBHOOK_SECRET: z.preprocess(
         (v) => (v === "" ? undefined : v),
@@ -52,6 +61,9 @@ const envSchema = z.object({
     // Webhook без секрета принимает апдейты от кого угодно — бот без секрета не запускаем.
     if (e.MAX_BOT_TOKEN && !e.MAX_WEBHOOK_SECRET) {
         ctx.addIssue({code: "custom", path: ["MAX_WEBHOOK_SECRET"], message: "обязателен, когда задан MAX_BOT_TOKEN"});
+    }
+    if (e.MAX_BOT_TOKEN && e.BOT_DOWNLOAD_CONCURRENCY >= e.DOWNLOAD_CONCURRENCY) {
+        ctx.addIssue({code: "custom", path: ["BOT_DOWNLOAD_CONCURRENCY"], message: "должно быть меньше DOWNLOAD_CONCURRENCY, иначе бот может занять все слоты сайта"});
     }
 });
 

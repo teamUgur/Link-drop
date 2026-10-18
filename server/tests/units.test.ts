@@ -8,6 +8,7 @@ import {safeFileName} from "../src/media/service.ts";
 import {detectSource, findUrl} from "../src/media/sources.ts";
 import {translateError, YtDlpExitError} from "../src/media/ytdlp.ts";
 import {contentDisposition} from "../src/shared/http.ts";
+import {KeyedLimit} from "../src/shared/keyed-limit.ts";
 import {Semaphore} from "../src/shared/semaphore.ts";
 import {YT_INFO} from "./fake-runner.ts";
 
@@ -138,12 +139,22 @@ describe("env", () => {
         expect(loadEnv({MAX_BOT_TOKEN: "", MAX_WEBHOOK_SECRET: ""}).MAX_BOT_TOKEN).toBeUndefined();
     });
 
+    it("bot must leave download slots for the site", () => {
+        const bot = {MAX_BOT_TOKEN: "t", MAX_WEBHOOK_SECRET: "secret-1"};
+        expect(() => loadEnv({...bot, DOWNLOAD_CONCURRENCY: "2", BOT_DOWNLOAD_CONCURRENCY: "2"})).toThrow(/BOT_DOWNLOAD_CONCURRENCY/);
+        expect(loadEnv({...bot, DOWNLOAD_CONCURRENCY: "3", BOT_DOWNLOAD_CONCURRENCY: "2"}).BOT_DOWNLOAD_CONCURRENCY).toBe(2);
+        // Без бота ограничение не мешает однослотовой конфигурации.
+        expect(loadEnv({DOWNLOAD_CONCURRENCY: "1"}).DOWNLOAD_CONCURRENCY).toBe(1);
+    });
+
     it("coerces numbers", () => {
         expect(loadEnv({MAX_FILE_MB: "2"}).MAX_FILE_MB).toBe(2);
     });
 });
 
 describe("PreparedFiles", () => {
+    // Сессия и IP совпадают по значению только для краткости: в тестах важно, разные они или нет.
+    const own = (session: string, ip = session) => ({session, ip});
     const log = {error: vi.fn()} as unknown as FastifyBaseLogger;
     const fakeFile = () => {
         const file = {filePath: "/x", sizeBytes: 1, fileName: "a.mp4", contentType: "video/mp4", cleanup: vi.fn(async () => {})};
@@ -151,20 +162,20 @@ describe("PreparedFiles", () => {
     };
 
     it("expires unclaimed file after ttl", async () => {
-        const files = new PreparedFiles(20, 10, log);
+        const files = new PreparedFiles(20, 10, 10, log);
         const file = fakeFile();
-        const id = files.put(file);
+        const id = files.put(file, own("1.1.1.1"));
         expect(files.get(id)).toBe(file);
         await expect.poll(() => file.cleanup.mock.calls.length).toBe(1);
         expect(files.get(id)).toBeUndefined();
     });
 
     it("evicts oldest over limit", () => {
-        const files = new PreparedFiles(60_000, 2, log);
+        const files = new PreparedFiles(60_000, 2, 10, log);
         const [a, b, c] = [fakeFile(), fakeFile(), fakeFile()];
-        const ida = files.put(a);
-        files.put(b);
-        files.put(c);
+        const ida = files.put(a, own("1.1.1.1"));
+        files.put(b, own("2.2.2.2"));
+        files.put(c, own("3.3.3.3"));
         expect(files.get(ida)).toBeUndefined();
         expect(a.cleanup).toHaveBeenCalledOnce();
         expect(files.size).toBe(2);
@@ -172,13 +183,63 @@ describe("PreparedFiles", () => {
     });
 
     it("complete removes once; get keeps file for retry", () => {
-        const files = new PreparedFiles(60_000, 2, log);
+        const files = new PreparedFiles(60_000, 2, 10, log);
         const file = fakeFile();
-        const id = files.put(file);
+        const id = files.put(file, own("1.1.1.1"));
         files.get(id);
         expect(file.cleanup).not.toHaveBeenCalled();
         files.complete(id);
         files.complete(id);
         expect(file.cleanup).toHaveBeenCalledOnce();
+    });
+
+    it("new file of the same owner replaces the old one, others stay", () => {
+        const files = new PreparedFiles(60_000, 10, 10, log);
+        const [a, b, other] = [fakeFile(), fakeFile(), fakeFile()];
+        const ida = files.put(a, own("1.1.1.1"));
+        const idOther = files.put(other, own("2.2.2.2"));
+        const idb = files.put(b, own("1.1.1.1"));
+        expect(files.get(ida)).toBeUndefined();
+        expect(a.cleanup).toHaveBeenCalledOnce();
+        expect(files.get(idb)).toBe(b);
+        expect(files.get(idOther)).toBe(other);
+
+        // Забранный файл освобождает владельца: следующий кладётся без вытеснения чужих.
+        files.complete(idb);
+        files.put(fakeFile(), own("1.1.1.1"));
+        expect(files.size).toBe(2);
+        void files.clear();
+    });
+
+    it("per-ip cap replaces the oldest unclaimed file of that ip, even across sessions", () => {
+        const files = new PreparedFiles(60_000, 10, 2, log);
+        const [a, b, c, other] = [fakeFile(), fakeFile(), fakeFile(), fakeFile()];
+        // Без cookie каждый запрос — новая сессия; потолок IP всё равно держит.
+        const ida = files.put(a, own("s1", "9.9.9.9"));
+        const idb = files.put(b, own("s2", "9.9.9.9"));
+        const idOther = files.put(other, own("s9", "8.8.8.8"));
+        const idc = files.put(c, own("s3", "9.9.9.9"));
+        expect(files.get(ida)).toBeUndefined();
+        expect(files.get(idb)).toBe(b);
+        expect(files.get(idc)).toBe(c);
+        expect(files.get(idOther)).toBe(other);
+        void files.clear();
+    });
+});
+
+describe("KeyedLimit", () => {
+    it("caps holders per key, release is idempotent and drops empty keys", () => {
+        const limit = new KeyedLimit(2);
+        const r1 = limit.tryAcquire("a")!;
+        const r2 = limit.tryAcquire("a")!;
+        expect(limit.tryAcquire("a")).toBeUndefined();
+        expect(limit.tryAcquire("b")).toBeDefined();
+        r1();
+        r1();
+        const r3 = limit.tryAcquire("a")!;
+        expect(limit.tryAcquire("a")).toBeUndefined();
+        r2();
+        r3();
+        expect(limit.size).toBe(1);
     });
 });

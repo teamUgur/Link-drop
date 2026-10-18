@@ -53,6 +53,18 @@ export class BusyError extends AppError {
     }
 }
 
+export class DownloadInProgressError extends AppError {
+    constructor() {
+        super("DOWNLOAD_IN_PROGRESS", 429, "У вас уже идёт загрузка — дождитесь, пока она закончится");
+    }
+}
+
+export class NetworkDownloadsLimitError extends AppError {
+    constructor() {
+        super("NETWORK_DOWNLOADS_LIMIT", 429, "Из вашей сети уже идёт несколько загрузок — попробуйте через минуту");
+    }
+}
+
 export class UpstreamTimeoutError extends AppError {
     constructor() {
         super("UPSTREAM_TIMEOUT", 504, "Платформа слишком долго отвечает, попробуйте позже");

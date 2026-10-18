@@ -145,7 +145,11 @@ describe("POST /api/media/resolve", () => {
     });
 });
 
-const prepare = (format: string, url = YT) => app.inject({method: "POST", url: "/api/media/prepare", payload: {url, format}});
+const prepare = (format: string, url = YT, ip = "127.0.0.1", sid?: string) =>
+    app.inject({method: "POST", url: "/api/media/prepare", payload: {url, format}, remoteAddress: ip, ...(sid ? {cookies: {ld_sid: sid}} : {})});
+const SID_A = "11111111-1111-4111-8111-111111111111";
+const SID_B = "22222222-2222-4222-8222-222222222222";
+const SID_C = "33333333-3333-4333-8333-333333333333";
 const events = (payload: string) => payload.trim().split("\n").map((line) => JSON.parse(line));
 
 describe("POST /api/media/prepare + GET /api/media/files/:id", () => {
@@ -221,16 +225,89 @@ describe("POST /api/media/prepare + GET /api/media/files/:id", () => {
         let open!: () => void;
         runner.gate = new Promise((r) => (open = r));
         await start({DOWNLOAD_CONCURRENCY: "1", QUEUE_LIMIT: "0"});
-        const first = prepare("mp4-720");
+        const first = prepare("mp4-720", YT, "10.0.0.1");
         await expect.poll(() => runner.calls.length).toBe(1);
 
-        const second = await prepare("mp4-720");
+        const second = await prepare("mp4-720", YT, "10.0.0.2");
         expect(second.statusCode).toBe(503);
         expect(second.json().error.code).toBe("BUSY");
         expect(second.headers["retry-after"]).toBe("30");
 
         open();
         expect(events((await first).payload).at(-1).type).toBe("ready");
+    });
+
+    it("issues a session cookie when there is none or it is not a uuid", async () => {
+        await start();
+        const fresh = await prepare("mp4-720");
+        const cookie = fresh.cookies.find((c) => c.name === "ld_sid")!;
+        expect(cookie.value).toMatch(/^[0-9a-f-]{36}$/);
+        expect(cookie).toMatchObject({path: "/api/media", httpOnly: true, sameSite: "Lax"});
+        expect(cookie.secure).toBeFalsy();
+
+        const forged = await app.inject({method: "POST", url: "/api/media/prepare", payload: {url: YT, format: "mp3"}, cookies: {ld_sid: "x"}});
+        expect(forged.cookies.find((c) => c.name === "ld_sid")!.value).not.toBe("x");
+        const kept = await prepare("mp3", YT, "127.0.0.1", SID_A);
+        expect(kept.cookies.find((c) => c.name === "ld_sid")).toBeUndefined();
+    });
+
+    it("one prepare per browser; another browser on the same ip goes up to DOWNLOADS_PER_IP", async () => {
+        let open!: () => void;
+        runner.gate = new Promise((r) => (open = r));
+        await start({DOWNLOADS_PER_IP: "2"});
+        const first = prepare("mp4-720", YT, "10.0.0.1", SID_A);
+        await expect.poll(() => runner.calls.length).toBe(1);
+
+        const sameBrowser = await prepare("mp4-480", YT, "10.0.0.1", SID_A);
+        expect(sameBrowser.statusCode).toBe(429);
+        expect(sameBrowser.json().error.code).toBe("DOWNLOAD_IN_PROGRESS");
+
+        // Коллега за тем же NAT — качает параллельно.
+        const colleague = prepare("mp4-720", YT, "10.0.0.1", SID_B);
+        await expect.poll(() => runner.calls.length).toBe(2);
+
+        // Третий браузер с того же IP упирается в потолок сети; без cookie — тоже.
+        const third = await prepare("mp4-720", YT, "10.0.0.1", SID_C);
+        expect(third.json().error.code).toBe("NETWORK_DOWNLOADS_LIMIT");
+        expect((await prepare("mp4-720", YT, "10.0.0.1")).json().error.code).toBe("NETWORK_DOWNLOADS_LIMIT");
+        // Отказ по IP не держит сессию: SID_C свободен, как только IP освободится.
+        expect(runner.calls).toHaveLength(2);
+
+        open();
+        expect(events((await first).payload).at(-1).type).toBe("ready");
+        expect(events((await colleague).payload).at(-1).type).toBe("ready");
+        expect(events((await prepare("mp3", YT, "10.0.0.1", SID_C)).payload).at(-1).type).toBe("ready");
+    });
+
+    it("ipv6 addresses of one /64 share the network cap", async () => {
+        let open!: () => void;
+        runner.gate = new Promise((r) => (open = r));
+        await start({DOWNLOADS_PER_IP: "1"});
+        const first = prepare("mp4-720", YT, "2001:db8:1:2::1");
+        await expect.poll(() => runner.calls.length).toBe(1);
+        const sibling = await prepare("mp4-720", YT, "2001:db8:1:2:ffff::9");
+        expect(sibling.json().error.code).toBe("NETWORK_DOWNLOADS_LIMIT");
+        open();
+        await first;
+    });
+
+    it("lock is released when prepare fails", async () => {
+        runner.failWith = new YtDlpExitError(1, "ERROR: weird");
+        await start();
+        expect(events((await prepare("mp4-720")).payload).at(-1).error.code).toBe("UPSTREAM_ERROR");
+        expect((await prepare("mp4-720", "https://example.com/v")).statusCode).toBe(422);
+        runner.failWith = undefined;
+        expect(events((await prepare("mp4-720")).payload).at(-1).type).toBe("ready");
+    });
+
+    it("new file of the same browser replaces its unclaimed previous file", async () => {
+        await start();
+        const firstReady = events((await prepare("mp4-720", YT, "127.0.0.1", SID_A)).payload).at(-1);
+        const firstDir = runner.lastDownloadDir();
+        const secondReady = events((await prepare("mp3", YT, "127.0.0.1", SID_A)).payload).at(-1);
+        expect((await app.inject({method: "GET", url: firstReady.fileUrl})).statusCode).toBe(404);
+        await expect.poll(() => existsSync(firstDir)).toBe(false);
+        expect((await app.inject({method: "GET", url: secondReady.fileUrl})).statusCode).toBe(200);
     });
 
     it("file id must be uuid; unknown uuid is 404", async () => {
