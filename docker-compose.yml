@@ -1,0 +1,56 @@
+services:
+  api:
+    build: ./server
+    restart: unless-stopped
+    env_file:
+      - path: ./server/.env
+        required: false
+    environment:
+      # Перекрывают server/.env: их задаёт образ и топология compose, а не человек. Иначе
+      # скопированный для локальной разработки .env (YTDLP_PATH=yt-dlp, NODE_ENV=development) ломает контейнер.
+      NODE_ENV: production
+      YTDLP_PATH: /opt/yt-dlp/yt-dlp
+      HOST: 0.0.0.0
+      PORT: 3000
+      TRUST_PROXY_HOPS: 1
+      TEMP_DIR: /var/tmp/linkdrop
+    # tini как PID 1: yt-dlp запускается detached, и осиротевшие ffmpeg после kill группы
+    # должен кто-то пожинать — Node зомби не собирает.
+    init: true
+    # Больше BOT_DRAIN_TIMEOUT_MS (90 с) в server.ts: Docker не должен убить процесс,
+    # пока бот дожидается начатых загрузок.
+    stop_grace_period: 2m
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    volumes:
+      # Диск, а не tmpfs: 3 параллельные загрузки до 500 МБ, плюс видео и аудио до склейки —
+      # в RAM это гигабайты. Остатки после kill -9 чистит cleanTempRoot на старте.
+      - media-tmp:/var/tmp/linkdrop
+    expose:
+      - "3000"
+
+  web:
+    build:
+      context: .
+      args:
+        VITE_MAX_BOT_URL: ${VITE_MAX_BOT_URL:-}
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # Сертификаты Let's Encrypt: без тома каждый перезапуск выпускает новые и упирается в лимиты ACME.
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+
+volumes:
+  media-tmp:
+  caddy-data:
+  caddy-config:

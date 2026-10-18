@@ -1,0 +1,42 @@
+{
+	# Admin API (:2019) не нужен: конфиг меняется пересборкой образа, а открытый порт управления
+	# внутри сети compose — лишняя поверхность атаки.
+	admin off
+}
+
+{$SITE_ADDRESS:localhost} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+		# img-src https: — превью приходят прямо с CDN платформ (ytimg, tiktokcdn, cdninstagram),
+		# список их доменов меняется, перечислять поимённо — ломать превью без предупреждения.
+		Content-Security-Policy "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+
+	handle /api/* {
+		# Потолок тела совпадает с bodyLimit Fastify (64 КБ): большие тела отсекаются до api.
+		request_body {
+			max_size 64KB
+		}
+		reverse_proxy api:3000 {
+			# Отдача файла — долгий поток: без буферизации, клиент сразу видит байты и размер.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		root * /srv
+		@assets path /assets/*
+		# Имена в /assets/ содержат хеш содержимого — кешируем навсегда; index.html — нет,
+		# иначе после деплоя браузер держит ссылки на старые бандлы.
+		header @assets Cache-Control "public, max-age=31536000, immutable"
+		header /index.html Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
