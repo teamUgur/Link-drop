@@ -1,3 +1,11 @@
+# Ротация логов Docker: по умолчанию json-file растёт без предела, и поток запросов (или атака)
+# забивает диск VPS логами. 5 × 10 МБ на контейнер — неделя-другая истории при обычном трафике.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
 services:
   api:
     build: ./server
@@ -20,9 +28,24 @@ services:
     # Больше BOT_DRAIN_TIMEOUT_MS (90 с) в server.ts: Docker не должен убить процесс,
     # пока бот дожидается начатых загрузок.
     stop_grace_period: 2m
+    logging: *logging
+    # ffmpeg и yt-dlp разбирают чужие файлы и страницы — это главная поверхность атаки. Процессу
+    # не нужно ни одной capability (порт 3000, файлы свои), повышать права через setuid нельзя.
     read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    # Потолки на контейнер: зависший или раздутый ffmpeg бьёт только по api, а не по всему VPS
+    # (Caddy, sshd). Память по умолчанию — на 8 resolve + 3 download одновременно; на VPS
+    # меньше 4 ГБ уменьшить вместе с RESOLVE_CONCURRENCY. pids — от fork-бомбы; каждый yt-dlp
+    # тянет node (JS-челлендж YouTube) и ffmpeg с потоками, поэтому с запасом.
+    mem_limit: ${API_MEMORY_LIMIT:-2g}
+    memswap_limit: ${API_MEMORY_LIMIT:-2g}
+    cpus: ${API_CPUS:-2}
+    pids_limit: 512
     tmpfs:
-      - /tmp:size=64m
+      - /tmp:size=64m,noexec,nosuid,nodev
     volumes:
       # Диск, а не tmpfs: 3 параллельные загрузки до 500 МБ, плюс видео и аудио до склейки —
       # в RAM это гигабайты. Остатки после kill -9 чистит cleanTempRoot на старте.
@@ -38,6 +61,16 @@ services:
     restart: unless-stopped
     environment:
       SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+    logging: *logging
+    # Caddy в образе работает от root: оставляем только право слушать 80/443.
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    pids_limit: 256
     ports:
       - "80:80"
       - "443:443"
