@@ -8,13 +8,13 @@ x-logging: &logging
 
 services:
   api:
-    build: ./server
+    build: ./backend
     restart: unless-stopped
     env_file:
-      - path: ./server/.env
+      - path: ./backend/.env
         required: false
     environment:
-      # Перекрывают server/.env: их задаёт образ и топология compose, а не человек. Иначе
+      # Перекрывают backend/.env: их задаёт образ и топология compose, а не человек. Иначе
       # скопированный для локальной разработки .env (YTDLP_PATH=yt-dlp, NODE_ENV=development) ломает контейнер.
       NODE_ENV: production
       YTDLP_PATH: /opt/yt-dlp/yt-dlp
@@ -55,7 +55,7 @@ services:
 
   web:
     build:
-      context: .
+      context: ./frontend
       args:
         VITE_MAX_BOT_URL: ${VITE_MAX_BOT_URL:-}
     restart: unless-stopped
