@@ -11,6 +11,15 @@ const SOURCES = {
 
 const DEFAULT_FORMAT = 'mp4-720'
 
+// Из приложений ссылку часто копируют вместе с текстом («Смотри! https://vm.tiktok.com/…») или без
+// схемы (youtube.com/watch…). Достаём первую ссылку и дописываем https:// — иначе сервер ответит
+// «некорректный запрос» на то, что человек считает ссылкой. Пунктуацию в конце отрезаем, как и бот.
+function extractUrl(text) {
+  const value = text.trim()
+  const found = value.match(/https?:\/\/[^\s<>"«»]+/i)?.[0] ?? (/^[\w-]+(\.[\w-]+)+\/\S*$/.test(value) ? `https://${value}` : value)
+  return found.replace(/[.,;:!?)\]}'…]+$/u, '')
+}
+
 const errorText = (error) => (error instanceof ApiError ? error.message : 'Что-то пошло не так, попробуйте ещё раз')
 
 // Скачивание обычной ссылкой, а не Blob из fetch: браузер сам пишет файл на диск и показывает прогресс.
@@ -86,8 +95,14 @@ export function DownloadCard() {
 
   const handleSubmit = async (event) => {
     event.preventDefault()
-    const value = url.trim()
+    const value = extractUrl(url)
     if (!value || phase === 'resolving' || phase === 'preparing') return
+    setUrl(value)
+    if (!/^https?:\/\//i.test(value)) {
+      setError('Не вижу ссылки — вставь ссылку на видео из YouTube, Instagram или TikTok')
+      setPhase('error')
+      return
+    }
     const controller = newController()
     setPhase('resolving')
     setError(null)
@@ -111,7 +126,7 @@ export function DownloadCard() {
     setDownloadError(null)
     setProgress({ started: false, bytes: 0 })
     try {
-      const ready = await prepareFile({ url: url.trim(), format: format.id }, {
+      const ready = await prepareFile({ url: extractUrl(url), format: format.id }, {
         signal: controller.signal,
         onEvent: (e) => {
           if (e.type === 'started') setProgress({ started: true, bytes: 0 })
@@ -176,7 +191,7 @@ export function DownloadCard() {
         <div className={`flex min-w-0 items-center rounded-[15px] border bg-[#fbfcfb] pl-[17px] pr-2 transition ${phase === 'error' ? 'border-error shadow-[0_0_0_4px_rgba(217,75,72,.1)]' : 'border-line focus-within:border-[#9eb37f] focus-within:shadow-[0_0_0_4px_rgba(199,255,74,.24)]'}`}>
           <span className="mr-[11px] grid w-[22px] shrink-0 place-items-center text-[#7d8a82]"><Icon><path d="M10 13a5 5 0 0 0 7.07.07l2-2a5 5 0 0 0-7.07-7.07l-1.15 1.15" /><path d="M14 11a5 5 0 0 0-7.07-.07l-2 2A5 5 0 0 0 7 20l1.15-1.15" /></Icon></span>
           <label className="sr-only" htmlFor="video-url">Ссылка на видео</label>
-          <input className="h-[54px] min-w-0 w-full border-0 bg-transparent text-[15px] outline-0 placeholder:text-[#9aa59d] disabled:text-muted" id="video-url" type="url" inputMode="url" value={url} onChange={(event) => handleUrlChange(event.target.value)} placeholder="Вставь ссылку на видео" autoComplete="url" disabled={phase === 'preparing'} aria-invalid={phase === 'error'} aria-describedby={phase === 'error' ? 'url-error' : undefined} />
+          <input className="h-[54px] min-w-0 w-full border-0 bg-transparent text-[15px] outline-0 placeholder:text-[#9aa59d] disabled:text-muted" id="video-url" type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} value={url} onChange={(event) => handleUrlChange(event.target.value)} placeholder="Вставь ссылку на видео" autoComplete="url" disabled={phase === 'preparing'} aria-invalid={phase === 'error'} aria-describedby={phase === 'error' ? 'url-error' : undefined} />
           <button className="shrink-0 border-0 bg-transparent px-2.5 py-2 text-xs text-muted transition-colors hover:text-ink disabled:opacity-50" type="button" onClick={handlePaste} disabled={phase === 'preparing'}>Вставить</button>
         </div>
         <button className="inline-flex min-h-[54px] items-center justify-center gap-2.5 rounded-[14px] border-0 bg-lime px-[23px] font-semibold text-ink transition hover:-translate-y-px hover:bg-lime-hover hover:shadow-[0_10px_24px_rgba(115,145,48,.16)] disabled:cursor-not-allowed disabled:bg-[#e6eadf] disabled:text-[#9da995] disabled:hover:translate-y-0 disabled:hover:shadow-none max-[760px]:w-full" type="submit" disabled={!url.trim() || busy}>
