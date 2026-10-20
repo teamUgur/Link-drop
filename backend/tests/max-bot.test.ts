@@ -127,6 +127,45 @@ describe("MAX webhook", () => {
         expect(runner.calls).toHaveLength(0);
     });
 
+    it("takes url from a forwarded message without own body", async () => {
+        const fwd = update("");
+        fwd.message = {...fwd.message, body: null as never, link: {type: "forward", message: {mid: "orig-1", seq: 1, text: "вот https://youtu.be/abc."}}} as never;
+        expect((await post(fwd)).statusCode).toBe(200);
+        await bot.drain();
+        expect(runner.calls).toHaveLength(1);
+        expect(runner.calls[0]!.args.at(-1)).toBe("https://youtu.be/abc");
+        expect(messages()[1]!.body).toMatchObject({attachments: [{type: "video"}]});
+    });
+
+    it("takes url hidden behind link markup or share preview", async () => {
+        const linked = update("видео");
+        linked.message.body = {...linked.message.body, markup: [{type: "strong", from: 0, length: 2}, {type: "link", from: 0, length: 5, url: "https://youtu.be/m1"}]} as never;
+        await post(linked);
+        const shared = update("", "mid-2", 43);
+        shared.message.body = {...shared.message.body, attachments: [{type: "image", payload: {}}, {type: "share", payload: {url: "https://youtu.be/s1"}}]} as never;
+        await post(shared);
+        await bot.drain();
+        expect(runner.calls.map((c) => c.args.at(-1)).sort()).toEqual(["https://youtu.be/m1", "https://youtu.be/s1"]);
+    });
+
+    it("in group chats ignores messages without our links, but downloads links", async () => {
+        const inGroup = (text: string, mid: string) => {
+            const u = update(text, mid);
+            u.message.recipient = {chat_id: -500, chat_type: "chat"};
+            return u;
+        };
+        await post(inGroup("всем привет", "g1"));
+        await post(inGroup("https://example.com/x", "g2"));
+        await post(inGroup("/start", "g3"));
+        await bot.drain();
+        expect(calls).toHaveLength(0);
+
+        await post(inGroup("https://youtu.be/abc", "g4"));
+        await bot.drain();
+        expect(runner.calls).toHaveLength(1);
+        expect(messages().at(-1)!.url).toBe(`${API}/messages?chat_id=-500`);
+    });
+
     it("explains unsupported site", async () => {
         await post(update("https://example.com/v"));
         await bot.drain();

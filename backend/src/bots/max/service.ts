@@ -4,7 +4,7 @@ import type {MediaService} from "../../media/service.ts";
 import type {Semaphore} from "../../shared/semaphore.ts";
 import {detectSource, findUrl} from "../../media/sources.ts";
 import type {MaxClient, Recipient, UploadType} from "./client.ts";
-import type {MaxUpdate} from "./schemas.ts";
+import type {MaxMessageBody, MaxUpdate} from "./schemas.ts";
 
 // Лимит MAX на видео-вложение. Больше — отправляем документом (до 4 ГБ), а не отказываем.
 const VIDEO_ATTACHMENT_MAX_BYTES = 250 * 1024 * 1024;
@@ -64,21 +64,28 @@ export class MaxBotService {
 
         const message = update.message;
         if (message.sender?.is_bot) return;
-        if (!this.markSeen(message.body.mid)) return;
+        // У пересылки без своего текста body нет — ключ дедупликации берём от пересланного сообщения.
+        const dedupKey = message.body?.mid ?? (message.link?.message ? `fwd:${message.link.message.mid}:${message.timestamp ?? ""}` : undefined);
+        if (dedupKey === undefined || !this.markSeen(dedupKey)) return;
 
         const to: Recipient | undefined = message.recipient.chat_id != null
             ? {chatId: message.recipient.chat_id}
             : message.sender ? {userId: message.sender.user_id} : undefined;
         if (!to) return;
+        // Каналы не обслуживаем; в группе отвечаем только на ссылки наших платформ — подсказки
+        // «не вижу ссылки» на каждое сообщение превратили бы бота в спам. chat_type нет — считаем личкой.
+        const chatType = message.recipient.chat_type ?? "dialog";
+        if (chatType === "channel") return;
+        const isDialog = chatType === "dialog";
 
-        const text = message.body.text ?? "";
+        const text = message.body?.text ?? "";
         if (/^\/start\b/.test(text.trim())) {
-            await this.client.sendMessage(to, {text: TEXT.greeting});
+            if (isDialog) await this.client.sendMessage(to, {text: TEXT.greeting});
             return;
         }
-        const url = findUrl(text);
-        if (!url) {
-            await this.client.sendMessage(to, {text: TEXT.noUrl});
+        const url = pickUrl([message.body, message.link?.message]);
+        if (!url || (!isDialog && !isSupported(url))) {
+            if (isDialog) await this.client.sendMessage(to, {text: TEXT.noUrl});
             return;
         }
 
@@ -133,4 +140,28 @@ export class MaxBotService {
         }
         return true;
     }
+}
+
+function isSupported(url: string): boolean {
+    try {
+        detectSource(url);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+// Ссылка может быть в тексте, спрятана за текстом-гиперссылкой (markup), только в превью (share)
+// или в пересланном/отвеченном сообщении. Берём первую ссылку нашей платформы, а если таких нет —
+// первую любую: человек получит понятный отказ «поддерживаются только…», а не «не вижу ссылки».
+function pickUrl(bodies: (MaxMessageBody | null | undefined)[]): string | undefined {
+    const candidates: string[] = [];
+    for (const body of bodies) {
+        if (!body) continue;
+        const inText = findUrl(body.text ?? "");
+        if (inText) candidates.push(inText);
+        for (const m of body.markup) candidates.push(m.url);
+        for (const a of body.attachments) if (a.payload?.url) candidates.push(a.payload.url);
+    }
+    return candidates.find(isSupported) ?? candidates[0];
 }

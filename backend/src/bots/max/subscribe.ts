@@ -16,3 +16,8 @@ if (!env.MAX_WEBHOOK_URL.startsWith("https://")) {
 const client = new MaxClient(env.MAX_API_URL, env.MAX_BOT_TOKEN);
 const result = await client.subscribe(env.MAX_WEBHOOK_URL, env.MAX_WEBHOOK_SECRET, ["message_created", "bot_started"]);
 console.log(JSON.stringify(result));
+// MAX отвечает 200 и на отказ (недоступный URL, кривой секрет) — признак успеха только поле success.
+if ((result as { success?: unknown } | undefined)?.success !== true) {
+    console.error("MAX не принял подписку — бот не будет получать сообщения");
+    process.exit(1);
+}
