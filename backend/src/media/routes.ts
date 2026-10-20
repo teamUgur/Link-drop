@@ -1,5 +1,6 @@
 import {randomUUID} from "node:crypto";
 import {createReadStream} from "node:fs";
+import type {OutgoingHttpHeaders} from "node:http";
 import {normalizeIP} from "@fastify/rate-limit";
 import {PassThrough} from "node:stream";
 import type {FastifyBaseLogger, FastifyPluginAsync, FastifyReply, FastifyRequest} from "fastify";
@@ -140,17 +141,28 @@ export const mediaRoutes: FastifyPluginAsync<MediaRoutesOptions> = async (app, o
         const file = opts.prepared.get(id);
         if (!file) throw new FileExpiredError();
 
-        // Удаляем только после полной отдачи ('finish', а не 'close': close приходит и при обрыве):
-        // оборванную загрузку можно повторить, пока не истёк TTL.
-        reply.raw.once("finish", () => opts.prepared.complete(id));
-
-        return reply
+        reply
             .header("Content-Type", file.contentType)
             .header("Content-Length", String(file.sizeBytes))
             .header("Content-Disposition", contentDisposition(file.fileName))
             .header("Cache-Control", "no-store")
-            .header("X-Content-Type-Options", "nosniff")
-            .send(createReadStream(file.filePath));
+            .header("X-Content-Type-Options", "nosniff");
+
+        // Fastify сам вешает HEAD на этот GET. HEAD шлют менеджеры загрузок, превью ссылок и антивирусы
+        // перед настоящим GET — его 'finish' не значит «файл забран», иначе GET следом получал 404.
+        // Ответ пишем мимо Fastify: поток на HEAD он вычитывает с диска целиком (до MAX_FILE_MB впустую),
+        // а на пустое тело ставит Content-Length: 0 — клиент решил бы, что файл пустой.
+        if (request.method === "HEAD") {
+            reply.hijack();
+            reply.raw.writeHead(200, reply.getHeaders() as OutgoingHttpHeaders);
+            reply.raw.end();
+            return reply;
+        }
+
+        // Удаляем только после полной отдачи ('finish', а не 'close': close приходит и при обрыве):
+        // оборванную загрузку можно повторить, пока не истёк TTL.
+        reply.raw.once("finish", () => opts.prepared.complete(id));
+        return reply.send(createReadStream(file.filePath));
     });
 };
 

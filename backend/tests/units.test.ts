@@ -6,7 +6,7 @@ import {PreparedFiles} from "../src/media/prepared-files.ts";
 import {availableFormats} from "../src/media/presets.ts";
 import {safeFileName} from "../src/media/service.ts";
 import {detectSource, findUrl} from "../src/media/sources.ts";
-import {translateError, YtDlpExitError} from "../src/media/ytdlp.ts";
+import {childEnv, translateError, YtDlpExitError} from "../src/media/ytdlp.ts";
 import {contentDisposition} from "../src/shared/http.ts";
 import {KeyedLimit} from "../src/shared/keyed-limit.ts";
 import {Semaphore} from "../src/shared/semaphore.ts";
@@ -44,6 +44,15 @@ describe("detectSource", () => {
     it("finds url in text", () => {
         expect(findUrl("глянь https://youtu.be/x123 круто")).toBe("https://youtu.be/x123");
         expect(findUrl("без ссылки")).toBeUndefined();
+    });
+
+    it.each([
+        ["глянь https://youtu.be/x123.", "https://youtu.be/x123"],
+        ["(https://youtu.be/x123), ещё", "https://youtu.be/x123"],
+        ["«https://vm.tiktok.com/ZM1/»", "https://vm.tiktok.com/ZM1/"],
+        ["https://youtube.com/watch?v=x1&t=10s!", "https://youtube.com/watch?v=x1&t=10s"],
+    ])("cuts trailing punctuation: %s", (text, url) => {
+        expect(findUrl(text)).toBe(url);
     });
 });
 
@@ -86,6 +95,13 @@ describe("translateError", () => {
         ["ERROR: something new and unknown", UpstreamError],
     ])("%s", (stderr, type) => {
         expect(translateError(new YtDlpExitError(1, stderr))).toBeInstanceOf(type);
+    });
+});
+
+describe("childEnv", () => {
+    it("passes only allowlisted variables to yt-dlp", () => {
+        const env = childEnv({PATH: "/bin", HTTPS_PROXY: "http://p:1", MAX_BOT_TOKEN: "secret", MAX_WEBHOOK_SECRET: "s", NODE_OPTIONS: "--inspect"});
+        expect(env).toEqual({PATH: "/bin", HTTPS_PROXY: "http://p:1", PYTHONUNBUFFERED: "1"});
     });
 });
 

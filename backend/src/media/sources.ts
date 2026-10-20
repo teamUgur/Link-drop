@@ -45,7 +45,9 @@ export function detectSource(rawUrl: string): { source: Source; url: string } {
     throw new UnsupportedSourceError();
 }
 
-// Для бота: первая ссылка в произвольном тексте сообщения.
+// Для бота: первая ссылка в произвольном тексте сообщения. Пунктуацию в конце отрезаем: «глянь
+// https://youtu.be/abc.» или ссылка в скобках — частый текст, а точка в id даёт уже другое видео.
+// В ссылках наших платформ такие символы в конце не встречаются.
 export function findUrl(text: string): string | undefined {
-    return text.match(/https?:\/\/\S+/i)?.[0];
+    return text.match(/https?:\/\/[^\s<>"«»]+/i)?.[0].replace(/[.,;:!?)\]}'…]+$/u, "");
 }

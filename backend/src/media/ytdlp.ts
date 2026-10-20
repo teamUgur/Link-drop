@@ -48,6 +48,24 @@ const KILL_GRACE_MS = 5_000;
 // Раз в секунду: тот же тик отдаёт прогресс в браузер, реже — полоса загрузки «дёргается».
 const WATCHDOG_INTERVAL_MS = 1_000;
 
+// Окружение yt-dlp — по списку, а не всё process.env: yt-dlp и ffmpeg разбирают чужие страницы
+// и файлы, а для YouTube yt-dlp исполняет в node JS плеера с сервера платформы. Токен бота и секрет
+// webhook такому процессу не нужны. Прокси-переменные оставлены: с VPS, где платформа недоступна
+// напрямую, yt-dlp ходит через HTTPS_PROXY без правки кода.
+const CHILD_ENV_KEYS = [
+    "PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "XDG_CACHE_HOME",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+];
+
+export function childEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+    const env: NodeJS.ProcessEnv = {PYTHONUNBUFFERED: "1"};
+    for (const key of CHILD_ENV_KEYS) {
+        if (source[key] !== undefined) env[key] = source[key];
+    }
+    return env;
+}
+
 export class SpawnRunner implements ProcessRunner {
     private readonly binary: string;
 
@@ -64,7 +82,7 @@ export class SpawnRunner implements ProcessRunner {
                 cwd: options.cwd,
                 detached: true,
                 stdio: ["ignore", options.captureStdout ? "pipe" : "ignore", "pipe"],
-                env: {...process.env, PYTHONUNBUFFERED: "1"},
+                env: childEnv(process.env),
             });
 
             const stdoutChunks: Buffer[] = [];

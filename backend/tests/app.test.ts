@@ -310,6 +310,22 @@ describe("POST /api/media/prepare + GET /api/media/files/:id", () => {
         expect((await app.inject({method: "GET", url: secondReady.fileUrl})).statusCode).toBe(200);
     });
 
+    it("HEAD returns headers and does not consume the file", async () => {
+        runner.fileBytes = 2048;
+        await start();
+        const ready = events((await prepare("mp4-720")).payload).at(-1);
+
+        const head = await app.inject({method: "HEAD", url: ready.fileUrl});
+        expect(head.statusCode).toBe(200);
+        expect(head.headers["content-length"]).toBe("2048");
+        expect(head.headers["content-disposition"]).toContain("attachment");
+        expect(head.rawPayload).toHaveLength(0);
+
+        const file = await app.inject({method: "GET", url: ready.fileUrl});
+        expect(file.statusCode).toBe(200);
+        expect(file.rawPayload).toHaveLength(2048);
+    });
+
     it("file id must be uuid; unknown uuid is 404", async () => {
         await start();
         expect((await app.inject({method: "GET", url: "/api/media/files/../../etc"})).statusCode).toBe(404);
